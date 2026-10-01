@@ -16,9 +16,9 @@ manifest (see [`docs/ci/1dash.v2.yaml.example`](docs/ci/1dash.v2.yaml.example)).
 ```yaml
 jobs:
   ship:
-    uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.12
+    uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.13
     with:
-      schema-ref: v1.0.12
+      schema-ref: v1.0.13
       services: ${{ inputs.services }}
     secrets: inherit
 ```

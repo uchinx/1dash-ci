@@ -15,8 +15,8 @@
 #
 # Pinning: callers pin the workflow AND the schema/tooling to the same
 # release ref, e.g.
-#   uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.12
-#   with: { schema-ref: v1.0.12 }
+#   uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.13
+#   with: { schema-ref: v1.0.13 }
 # schema-ref selects docs/1dash-schema.json + docs/ci/*.py from this
 # repo, so validation, matrix construction, and deploy/poll behavior
 # always match the workflow code. Keep the two refs in sync.
@@ -161,6 +161,10 @@ jobs:
           {
             echo "matrix<<MATRIX_EOF"
             cat ship-matrix/matrix.json
+            echo # terminate the last line: without this, a matrix.json
+              # lacking a trailing newline concatenates the closing
+              # delimiter onto the JSON and GitHub reports
+              # "Matching delimiter not found"
             echo "MATRIX_EOF"
             echo "services=$(jq -r '[.include[].service] | join(",")' ship-matrix/matrix.json)"
           } >> "$GITHUB_OUTPUT"

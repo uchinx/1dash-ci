@@ -230,7 +230,12 @@ def main(argv=None):
 
     matrix_path = os.path.join(args.out_dir, "matrix.json")
     with open(matrix_path, "w", encoding="utf-8") as f:
+        # Trailing newline: the workflow consumes this file with a
+        # GITHUB_OUTPUT heredoc, whose closing delimiter must start on
+        # its own line (a missing newline concatenates delimiter onto
+        # the last JSON line and GitHub reports "delimiter not found").
         json.dump({"include": include}, f, sort_keys=True)
+        f.write("\n")
     print(f"validated {len(include)} workload(s): {', '.join(m['service'] for m in include)}")
     return 0
 
