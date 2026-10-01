@@ -15,8 +15,8 @@
 #
 # Pinning: callers pin the workflow AND the schema/tooling to the same
 # release ref, e.g.
-#   uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.11
-#   with: { schema-ref: v1.0.11 }
+#   uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.12
+#   with: { schema-ref: v1.0.12 }
 # schema-ref selects docs/1dash-schema.json + docs/ci/*.py from this
 # repo, so validation, matrix construction, and deploy/poll behavior
 # always match the workflow code. Keep the two refs in sync.

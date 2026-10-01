@@ -104,7 +104,12 @@ def check_build_shape(service_key, build):
         if "://" in p or p.endswith(".git") or ".git#" in p or ".git@" in p:
             fail(f"services[{service_key}].build.{field} {p!r}: remote contexts are not supported")
         first = p.split("/", 1)[0]
-        if first != "." and ("." in first or ":" in first):
+        # Hostname-like first segments (github.com/..., host:path) are
+        # remote shorthands — but only with a "/". A bare filename
+        # cannot be a host/path shorthand, so conventional names like
+        # Dockerfile.remuxer stay legal. Colons are still rejected
+        # anywhere; dotted names WITH a slash stay rejected.
+        if first != "." and (":" in first or ("." in first and "/" in p)):
             fail(f"services[{service_key}].build.{field} {p!r}: remote contexts are not supported")
         if p.startswith("/"):
             fail(
