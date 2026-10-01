@@ -1,0 +1,379 @@
+# Reusable v2 shipping workflow (CI_MULTI_SERVICE_PLAN MS-05).
+#
+# Ships every workload declared in a version-2 1dash.yaml manifest, each
+# with its own Dockerfile/context, pushed digest, and 1dash App:
+#
+#   existing CI event → validate v2 manifest → workload matrix
+#     api     → Dockerfile.api     → push digest → provision HTTP service + tasks
+#     reports → Dockerfile.reports → push digest → activate job image + cron/HTTP jobs
+#     worker  → Dockerfile.worker  → push digest → provision private worker
+#     → poll each Deployment → combined summary
+#
+# Later, on the 1dash host: HTTP → Caddy → api replicas; cron tick /
+# authorized Run → reports trigger → one-shot container. Deploying a
+# job never fires it; cron runs on the host, never in Actions.
+#
+# Pinning: callers pin the workflow AND the schema/tooling to the same
+# release ref, e.g.
+#   uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.11
+#   with: { schema-ref: v1.0.11 }
+# schema-ref selects docs/1dash-schema.json + docs/ci/*.py from this
+# repo, so validation, matrix construction, and deploy/poll behavior
+# always match the workflow code. Keep the two refs in sync.
+#
+# Environments: callers may pass with: { environment: prod }. The gate
+# lives on the ship legs (not the caller job — GitHub forbids
+# environment: on reusable-workflow caller jobs). Each matrix leg then
+# requires that environment's protection rules AND resolves
+# environment-scoped secrets, so N legs mean N approval clicks. Empty
+# (the default) preserves the current behavior: no gate.
+#
+# Trust: call ONLY from push to protected branches or workflow_dispatch
+# (see docs/ci/caller.yml). Never call from pull_request: the ship legs
+# hold registry + deploy credentials while building untrusted code.
+# The CI credential (ONEDASH_TOKEN) is only an HTTP Authorization
+# header on the deploy step — it never becomes a build input.
+
+name: ship to 1dash (v2)
+
+on:
+  workflow_call:
+    secrets:
+      ONEDASH_URL:
+        description: "1dash base URL the legs deploy to (overridable per-call via the onedash-url input)."
+        required: true
+      ONEDASH_TOKEN:
+        description: "Provision-scoped 1dash token used only as an HTTP Authorization header on the deploy step."
+        required: true
+      TOOLS_TOKEN:
+        description: "Optional repos:read PAT for checking out the pinned helpers/schema when the tooling repo is private."
+        required: false
+    inputs:
+      schema-ref:
+        description: "Git ref of 1dash pinning docs/1dash-schema.json + docs/ci helpers. Keep in sync with the uses: ref."
+        required: false
+        type: string
+        default: main
+      config-path:
+        description: "Path to the v2 manifest inside the caller repo."
+        required: false
+        type: string
+        default: 1dash.yaml
+      services:
+        description: "Optional manual subset, e.g. 'api,reports'. Empty = all declared workloads. No branch/path/tag rules."
+        required: false
+        type: string
+        default: ""
+      poll-timeout-minutes:
+        description: "Explicit Deployment poll deadline per leg. On expiry the leg fails but server work may still complete."
+        required: false
+        type: number
+        default: 20
+      build-timeout-minutes:
+        description: "Job timeout bounding build+push+deploy per leg (separate from the poll deadline)."
+        required: false
+        type: number
+        default: 30
+      max-parallel:
+        description: "Bounded matrix parallelism (registry + server pressure)."
+        required: false
+        type: number
+        default: 2
+      platforms:
+        description: "Optional build platforms, e.g. 'linux/amd64,linux/arm64'. Empty = runner-native single platform."
+        required: false
+        type: string
+        default: ""
+      onedash-url:
+        description: "Override for the 1dash base URL (default: ONEDASH_URL secret)."
+        required: false
+        type: string
+        default: ""
+      environment:
+        description: "Optional GitHub environment gating every ship leg (e.g. 'prod'). Empty = no gate. When set, each matrix leg requires the environment's protection rules and resolves environment-scoped secrets — so N legs mean N approval clicks."
+        required: false
+        type: string
+        default: ""
+      tools-repo:
+        description: "Repo hosting docs/1dash-schema.json + docs/ci helpers (defaults to this repo; keep schema-ref on its releases)."
+        required: false
+        type: string
+        default: uchinx/1dash-ci
+
+jobs:
+  parse:
+    name: validate v2 manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # upload the matrix artifact the legs download
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      services: ${{ steps.matrix.outputs.services }}
+    steps:
+      # Exact commit checkout: the matrix builds and deploys this sha,
+      # never the branch tip at build time.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      # Pinned validation deps: full schema validation (nested fields,
+      # not just top-level keys) + duplicate-key rejection.
+      - name: install validation deps
+        run: pip install "pyyaml==6.0.2" "jsonschema==4.23.0"
+
+      # Tooling travels with the schema pin so helper behavior always
+      # matches the validated schema.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs['tools-repo'] }}
+          ref: ${{ inputs['schema-ref'] }}
+          path: _1dash-tools
+          persist-credentials: false
+          # TOOLS_TOKEN (repos:read PAT, via secrets: inherit) when the
+          # tooling repo is private; otherwise the caller's GITHUB_TOKEN.
+          # The fallback keeps the value non-empty: checkout rejects an
+          # explicitly-empty token ("required and not supplied").
+          token: ${{ secrets.TOOLS_TOKEN != '' && secrets.TOOLS_TOKEN || github.token }}
+
+      - name: validate manifest + build matrix
+        id: matrix
+        env:
+          MANIFEST: ${{ inputs['config-path'] }}
+          SCHEMA: _1dash-tools/docs/1dash-schema.json
+          REPO: ${{ github.repository }}
+          SERVICES: ${{ inputs['services'] }}
+        run: |
+          set -euo pipefail
+          python3 _1dash-tools/docs/ci/parse_manifest.py \
+            --manifest "$MANIFEST" \
+            --schema "$SCHEMA" \
+            --repo "$REPO" \
+            --repo-root . \
+            --out-dir ship-matrix \
+            --services "$SERVICES"
+          {
+            echo "matrix<<MATRIX_EOF"
+            cat ship-matrix/matrix.json
+            echo "MATRIX_EOF"
+            echo "services=$(jq -r '[.include[].service] | join(",")' ship-matrix/matrix.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ship-matrix
+          path: ship-matrix/
+          if-no-files-found: error
+
+  ship:
+    name: ship ${{ matrix.service }}
+    needs: parse
+    # Optional environment gate (see inputs.environment). The gate
+    # sits on the legs because GitHub rejects environment: on the
+    # caller's reusable-workflow job. Legs run in the caller repo's
+    # context, so the name resolves against the CALLER's environments
+    # and environment-scoped secrets become visible to secrets.* here.
+    # Each matrix leg is approved separately. Empty = no gate.
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs['build-timeout-minutes'] }}
+    permissions:
+      contents: read
+      packages: write
+      actions: write # upload the per-leg result artifact
+    strategy:
+      fail-fast: false # one workload's failure never cancels its siblings
+      max-parallel: ${{ inputs['max-parallel'] }} # bounded parallelism
+      matrix: ${{ fromJson(needs.parse.outputs.matrix) }}
+    # Per-target deployment serialization: legs for one service queue
+    # instead of overlapping. cancel-in-progress is false so a newer
+    # push never cancels an accepted server deployment. Groups are NOT
+    # FIFO, so the freshness step below still skips superseded runs
+    # visibly — no strict global ordering is claimed.
+    concurrency:
+      group: ship-${{ github.repository }}-${{ matrix.service }}
+      cancel-in-progress: false
+    steps:
+      # Default credential persistence: the freshness step below
+      # runs git ls-remote against origin (needs auth on private repos).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ship-matrix
+          path: ship-matrix
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs['tools-repo'] }}
+          ref: ${{ inputs['schema-ref'] }}
+          path: _1dash-tools
+          persist-credentials: false
+          # TOOLS_TOKEN (repos:read PAT, via secrets: inherit) when the
+          # tooling repo is private; otherwise the caller's GITHUB_TOKEN.
+          # The fallback keeps the value non-empty: checkout rejects an
+          # explicitly-empty token ("required and not supplied").
+          token: ${{ secrets.TOOLS_TOKEN != '' && secrets.TOOLS_TOKEN || github.token }}
+
+      # GitHub concurrency is not FIFO: a queued leg may be stale by
+      # the time it starts. A stale leg submits nothing and reports
+      # skipped-stale (visible failure naming the superseding head).
+      - name: check branch-head freshness
+        id: fresh
+        env:
+          SERVICE: ${{ matrix.service }}
+          WORKLOAD_TYPE: ${{ matrix.type }}
+        run: |
+          set -euo pipefail
+          STALE=false
+          NOTE=""
+          if [[ "$GITHUB_REF" == refs/heads/* ]]; then
+            HEAD_SHA=$(git ls-remote origin "$GITHUB_REF" | awk '{print $1}')
+            if [[ -n "$HEAD_SHA" && "$HEAD_SHA" != "$GITHUB_SHA" ]]; then
+              STALE=true
+              NOTE="branch $GITHUB_REF moved to $HEAD_SHA; this run built $GITHUB_SHA and submits nothing"
+              echo "::warning::$NOTE"
+            fi
+          fi
+          echo "stale=$STALE" >> "$GITHUB_OUTPUT"
+          if [[ "$STALE" == "true" ]]; then
+            mkdir -p ship-result
+            RESULT_OUT="ship-result/result-$SERVICE.json" NOTE="$NOTE" \
+              python3 -c 'import json,os; json.dump({"service": os.environ["SERVICE"], "type": os.environ["WORKLOAD_TYPE"], "image": "", "phase": "skipped-stale", "deployment_id": "", "note": os.environ["NOTE"]}, open(os.environ["RESULT_OUT"], "w"), sort_keys=True)'
+
+            echo "$NOTE"
+          fi
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: steps.fresh.outputs.stale != 'true'
+        with:
+          # Exact commit checkout above; provenance attestations stay
+          # off so no id-token permission is needed (release signing
+          # lives in release.yml, not per-ship).
+          provenance: false
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        if: steps.fresh.outputs.stale != 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Explicit local build context + file + optional target; unique
+      # image/cache names per repo/service (image_base already embeds
+      # org/repo/service); the pushed digest — not :latest — is what
+      # the deploy step submits. No build/registry/deploy credentials
+      # appear here beyond the registry login above.
+      - name: build + push image
+        id: build
+        if: steps.fresh.outputs.stale != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          platforms: ${{ inputs['platforms'] }}
+          push: true
+          tags: ${{ matrix.image_base }}:${{ github.sha }}
+          cache-from: type=gha,scope=ship-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=ship-${{ matrix.service }}
+          provenance: false
+
+      # Deploy the pushed digest + poll to terminal. ONEDASH_TOKEN is
+      # only this step's Authorization header — never a build input.
+      - name: deploy workload + poll to terminal
+        if: steps.fresh.outputs.stale != 'true'
+        env:
+          ONEDASH_URL: ${{ inputs['onedash-url'] != '' && inputs['onedash-url'] || secrets.ONEDASH_URL }}
+          ONEDASH_TOKEN: ${{ secrets.ONEDASH_TOKEN }}
+          REPO: ${{ github.repository }}
+          SERVICE: ${{ matrix.service }}
+          WORKLOAD_TYPE: ${{ matrix.type }}
+          IMAGE_REF: ${{ matrix.image_base }}@${{ steps.build.outputs.digest }}
+          IDEMPOTENCY_KEY: ship-${{ github.run_id }}-${{ matrix.service }}-${{ github.run_attempt }}
+          POLL_TIMEOUT_MINUTES: ${{ inputs['poll-timeout-minutes'] }}
+        run: |
+          set -euo pipefail
+          : "${ONEDASH_URL:?ONEDASH_URL secret (or onedash-url input) is required}"
+          : "${ONEDASH_TOKEN:?ONEDASH_TOKEN secret is required}"
+          mkdir -p ship-result
+          python3 _1dash-tools/docs/ci/deploy_workload.py \
+            --server "$ONEDASH_URL" \
+            --repo "$REPO" \
+            --service "$SERVICE" \
+            --type "$WORKLOAD_TYPE" \
+            --workload-file "ship-matrix/workload-$SERVICE.json" \
+            --image "$IMAGE_REF" \
+            --idempotency-key "$IDEMPOTENCY_KEY" \
+            --poll-interval 5 \
+            --poll-timeout "$((POLL_TIMEOUT_MINUTES * 60))" \
+            --result-out "ship-result/result-$SERVICE.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ship-result-${{ matrix.service }}
+          path: ship-result/result-${{ matrix.service }}.json
+          if-no-files-found: error
+
+  summary:
+    name: ship summary
+    needs: [parse, ship]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # download the per-leg result artifacts
+    steps:
+      # Gate first: when validation failed there are no legs and no
+      # result artifacts, so fail here with the cause instead of
+      # downloading nothing.
+      - name: gate on manifest validation
+        env:
+          PARSE_RESULT: ${{ needs.parse.result }}
+        run: |
+          if [[ "$PARSE_RESULT" != "success" ]]; then
+            {
+              echo "## 1dash ship summary"
+              echo ""
+              echo "**Manifest validation failed — nothing was built or submitted.**"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs['tools-repo'] }}
+          ref: ${{ inputs['schema-ref'] }}
+          path: _1dash-tools
+          persist-credentials: false
+          # TOOLS_TOKEN (repos:read PAT, via secrets: inherit) when the
+          # tooling repo is private; otherwise the caller's GITHUB_TOKEN.
+          # The fallback keeps the value non-empty: checkout rejects an
+          # explicitly-empty token ("required and not supplied").
+          token: ${{ secrets.TOOLS_TOKEN != '' && secrets.TOOLS_TOKEN || github.token }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ship-result-*
+          merge-multiple: true
+          path: ship-results
+
+      - name: combined summary (partial failure fails CI, no sibling rollback)
+        env:
+          EXPECTED: ${{ needs.parse.outputs.services }}
+        run: |
+          set -euo pipefail
+          python3 _1dash-tools/docs/ci/summarize_results.py \
+            --results-dir ship-results \
+            --summary-out "$GITHUB_STEP_SUMMARY" \
+            --expected "$EXPECTED"
