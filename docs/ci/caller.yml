@@ -5,7 +5,7 @@
 # clicks, no per-app GitHub configuration.
 #
 # Pinning: keep the uses: ref and schema-ref on the SAME 1dash release
-# (here v1.0.13) so the validated schema and the shipping code always
+# (here v1.0.15) so the validated schema and the shipping code always
 # match. Dependabot/Renovate can bump both together.
 #
 # Permissions (least privilege): the reusable legs push service images
@@ -45,8 +45,8 @@ permissions:
   actions: write
 jobs:
   ship:
-    uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.13
+    uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.15
     with:
-      schema-ref: v1.0.13
+      schema-ref: v1.0.15
       services: ${{ inputs.services }}
     secrets: inherit

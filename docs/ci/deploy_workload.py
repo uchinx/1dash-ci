@@ -38,6 +38,23 @@ import urllib.request
 # server holds another admission for this target; the retry replays or
 # joins it. Every other 4xx is a caller-fixable verdict.
 RETRYABLE_409_CODES = {"ERR_IN_FLIGHT"}
+RETRYABLE_409_CODES = {"ERR_IN_FLIGHT"}
+
+# Substrings (lowercased) identifying an edge bot-protection block page
+# (Cloudflare Bot Fight Mode / WAF block) as opposed to a server verdict.
+EDGE_BLOCK_MARKERS = (
+    "browser's signature",
+    "attention required",
+    "just a moment",
+    "verify you are human",
+    "cf-ray",
+    "cloudflare",
+)
+
+
+def sniff_edge_block(raw_text):
+    lowered = (raw_text or "").lower()
+    return any(m in lowered for m in EDGE_BLOCK_MARKERS)
 
 
 def fail(msg, result=None, result_path=None):
@@ -64,6 +81,12 @@ def api_call(method, url, token, body=None):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            # Identifiable UA: the urllib default (Python-urllib/x.y) is
+            # blocked by trivial edge rules; a real UA is also what an
+            # allowlist exception matches on. Never a browser spoof.
+            "User-Agent": "1dash-ci-leg (+https://github.com/uchinx/1dash-ci)",
+            # NOTE: this URL names the mirror repo; the source of truth
+            # names the private repo and the mirror publish rewrites it.
         },
     )
     try:
@@ -71,9 +94,28 @@ def api_call(method, url, token, body=None):
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
-            payload = json.loads(e.read().decode())
-        except (ValueError, OSError):
+            raw = e.read().decode(errors="replace")
+        except OSError:
+            raw = ""
+        try:
+            payload = json.loads(raw)
+        except ValueError:
             payload = {"error": f"HTTP {e.code}"}
+        if not isinstance(payload, dict) or sniff_edge_block(raw):
+            # Edge bot protection (Cloudflare-style block page) sits in
+            # front of the server: the request never reached admission.
+            # Retrying is pointless — the operator must exempt the CI
+            # API paths (WAF skip) or point ONEDASH_URL at an unproxied
+            # origin hostname. Say so instead of a bare HTTP code.
+            payload = {
+                "error": (
+                    f"HTTP {e.code}: blocked by edge bot protection in "
+                    "front of the 1dash server (request never reached "
+                    "admission) — add a WAF skip for /api/ci/* or point "
+                    "ONEDASH_URL at an unproxied origin hostname"
+                ),
+                "edge_block": True,
+            }
         return e.code, payload
 
 
