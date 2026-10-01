@@ -1,0 +1,52 @@
+# v2 caller: copy to <service-repo>/.github/workflows/ship.yml.
+#
+# The service repo holds a version-2 1dash.yaml at its root plus this
+# file. New-app onboarding = this file + 1dash.yaml. No dashboard
+# clicks, no per-app GitHub configuration.
+#
+# Pinning: keep the uses: ref and schema-ref on the SAME 1dash release
+# (here v1.0.10) so the validated schema and the shipping code always
+# match. Dependabot/Renovate can bump both together.
+#
+# Permissions (least privilege): the reusable legs push service images
+# to GHCR with the built-in GITHUB_TOKEN and pass the matrix/results
+# between jobs as artifacts, so the caller grants contents:read +
+# packages:write + actions:write. Org secrets (once): ONEDASH_URL,
+# ONEDASH_TOKEN (provision-scoped token). Per-repo secrets: none.
+# `secrets: inherit` passes them to the reusable workflow. If the
+# tooling repo itself is private, also define org secret TOOLS_TOKEN
+# (repos:read PAT) so legs can check out the pinned helpers/schema.
+#
+# Environments (optional): with: { environment: prod } gates every
+# ship leg behind that GitHub environment's protection rules and lets
+# legs resolve environment-scoped secrets. Each matrix leg is approved
+# separately, so N workloads mean N approval clicks. Omit (or leave
+# empty) for no gate. NOTE: environment: goes under with: here —
+# GitHub rejects environment: directly on this caller job (a reusable-
+# workflow call accepts only name/uses/with/strategy/secrets).
+#   with:
+#     environment: prod
+name: ship
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Optional manual subset, e.g. "reports". Empty = all declared workloads.'
+        required: false
+        default: ""
+# Trust: push to a protected branch + manual dispatch ONLY. Never add
+# pull_request here: ship legs hold registry + deploy credentials while
+# building the checked-out code.
+permissions:
+  contents: read
+  packages: write
+  actions: write
+jobs:
+  ship:
+    uses: uchinx/1dash-ci/.github/workflows/ship.yml@v1.0.10
+    with:
+      schema-ref: v1.0.10
+      services: ${{ inputs.services }}
+    secrets: inherit

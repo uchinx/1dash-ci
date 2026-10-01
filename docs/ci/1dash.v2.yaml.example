@@ -1,0 +1,69 @@
+# Example v2 1dash.yaml (repo root) — multi-workload manifest.
+#
+# Shipped by the reusable workflow at .github/workflows/ship.yml: each
+# services[] entry builds its own Dockerfile/context, pushes its own
+# digest, and provisions/deploys its own App (api + worker are
+# long-lived services; reports is a job — image + cron/HTTP triggers,
+# zero permanent replicas). One repo, three independent outcomes.
+#
+# Validated in CI against docs/1dash-schema.json at the pinned
+# schema-ref (full nested validation + duplicate-key rejection), then
+# re-validated by the server at admission. Secrets never go here —
+# plaintext env only; attach secrets via dashboard env groups.
+#
+# The image's ENTRYPOINT/CMD starts the server/worker. Trigger
+# `command` overrides CMD per fire; empty uses image defaults.
+version: 2
+services:
+  api:
+    name: shop-api
+    type: service
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+      target: production # optional Dockerfile build stage
+    deploy:
+      replicas: 2
+      ports: [8080]
+      domains: [api.example.com]
+      readiness:
+        path: /healthz
+      env:
+        LOG_LEVEL: info
+    triggers: # optional maintenance job on this App
+      cleanup:
+        schedule: "CRON_TZ=UTC 0 3 * * *"
+        command: ["/app/api", "cleanup"]
+        timeoutSeconds: 600
+        enabled: true
+
+  reports:
+    name: shop-reports
+    type: job # image deployed; no permanent replicas
+    build:
+      context: services/reports
+      dockerfile: services/reports/Dockerfile
+    deploy:
+      env:
+        REPORT_FORMAT: json
+    triggers:
+      hourly:
+        schedule: "CRON_TZ=UTC 0 * * * *"
+        command: ["/app/reports", "generate"]
+        timeoutSeconds: 1800
+        enabled: true
+      rebuild:
+        schedule: "" # manual / authenticated HTTP fire only
+        command: ["/app/reports", "rebuild"]
+        timeoutSeconds: 3600
+
+  worker:
+    name: shop-worker
+    type: service
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    deploy:
+      replicas: 1
+      domains: [] # explicitly private; no auto-domain
+    triggers: {}

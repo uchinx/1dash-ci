@@ -1,0 +1,647 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://1dash.local/docs/1dash-schema.json",
+  "title": "1dash.yaml v1+v2 \u2014 CI deploy spec (CI_EXTENSIBILITY_PLAN \u00a73/\u00a73b, CI_MULTI_SERVICE_PLAN \u00a73)",
+  "description": "Strict schema for 1dash.yaml. Parsed by the reusable workflow, sent as JSON in POST /api/ci/deploy. The server re-validates everything (workflow validation is UX only). oneOf enforces the per-version shape: v1 is the single-service manifest (unchanged), v2 adds the services map of independently deployed workloads with Dockerfile/context/type/App Trigger config. Unknown keys are rejected so typos fail fast in CI. Duplicate YAML keys cannot be detected by yaml.safe_load \u2014 the server rejects duplicate JSON keys at admission. Versioned by git ref in the workflow call.",
+  "type": "object",
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "version": {
+      "enum": [
+        1,
+        2
+      ],
+      "description": "Schema version: 1 = single-service manifest, 2 = multi-workload services map (shape enforced by oneOf)."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "description": "Optional app identity. Default = sanitized repo name (lowercase DNS-label rules mirroring apps.ValidateInternalHostname). A push matching by provisioned_repo renames the row in place when name: differs."
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Optional explicit domains. Default = auto <name>.<autoDomainSuffix>. Each entry x ports[0] becomes a DomainBinding (publicPath and internalPath '/', tlsMode auto). Suffix must match AllowedDomainSuffix or equal the auto form (409 ERR_HOST_CLAIMED on conflict)."
+    },
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535
+      },
+      "description": "Optional container ports. First = proxy target + health default. Empty (absent) means port 80. Ports beyond the first are accepted but only the first is routed (multi-port routing is out of scope)."
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Optional replica count. Default = policy.defaultReplicas. Yaml is source of truth: every CI deploy overwrites replicas (a manual scale-up IS reverted on next push). Negative is a 400, not fillDefaults."
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpus": {
+          "type": "number",
+          "minimum": 0
+        },
+        "memoryMb": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Optional resource limits (apps.ValidateResources). Zero = unlimited sentinel; memoryMb > 0 and < 4 is rejected (Docker minimum)."
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/"
+        }
+      },
+      "description": "Optional readiness probe. path present = HTTP probe ({mode:http, httpPath:path}); absent = TCP default (existing behavior)."
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Optional plaintext non-secrets ONLY (map[string]string). Do NOT put secrets in git \u2014 attach secrets via dashboard env groups. Sorted by key for determinism when mapped to []EnvVar (secret:false)."
+    },
+    "envGroups": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Optional subscribed env-group names. Must already exist (else ERR_UNKNOWN_ENV_GROUP). Resolved live at spawn time; app vars win on collision."
+    },
+    "envMounts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "group",
+          "path"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Existing env-group name (else ERR_UNKNOWN_ENV_GROUP). Existence resolves at materialize time \u2014 fail closed per spawn, never an empty dir."
+          },
+          "path": {
+            "type": "string",
+            "minLength": 2,
+            "pattern": "^/",
+            "description": "Absolute clean container path. '/' and '..' segments rejected; must not overlap sibling mounts or volumes targets."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "0600",
+              "0640",
+              "0644"
+            ],
+            "description": "Optional file mode, default 0640 (0600 breaks common non-root runtimes). Whitelist only."
+          }
+        }
+      },
+      "description": "Optional file-mount groups (\u00a73b). Materialized to <dataDir>/envmounts/<appID>/<groupID>/<KEY> and bind-mounted <hostDir>:<containerPath>:ro."
+    },
+    "services": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {
+        "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+            "description": "Optional App identity. Default = <sanitized-repo>-<service>. Overlong/reserved/conflicting names are rejected, never truncated."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "service",
+              "job"
+            ],
+            "description": "REQUIRED in v2 (no implicit default). service = long-lived replicas; job = image with zero permanent replicas. Static artifacts stay outside."
+          },
+          "build": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "context": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Repo-root-relative build context dir (default .). Absolute paths, traversal, remote contexts, and CLI flags are rejected; must exist."
+              },
+              "dockerfile": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Repo-root-relative Dockerfile path (default Dockerfile). May sit outside the context but never outside the repo; must exist."
+              },
+              "target": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional Dockerfile build stage."
+              }
+            }
+          },
+          "deploy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "replicas": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Service: default = policy.defaultReplicas. Job: must be 0 when present (zero replicas representation); positive replicas rejected."
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "description": "Service: first = proxy target. Job: must not be declared."
+              },
+              "domains": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Service: omitted = auto-domain policy, explicit [] = private. Job: must not declare entries."
+              },
+              "readiness": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^/"
+                  }
+                },
+                "description": "Service: path present = HTTP probe. Job: must not declare a path."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Plaintext nonsecrets ONLY."
+              },
+              "resources": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cpus": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "memoryMb": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "envGroups": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "envMounts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "group",
+                    "path"
+                  ],
+                  "properties": {
+                    "group": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 2,
+                      "pattern": "^/"
+                    },
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "0600",
+                        "0640",
+                        "0644"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Same shapes as v1. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
+          },
+          "triggers": {
+            "type": "object",
+            "maxProperties": 64,
+            "propertyNames": {
+              "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "schedule": {
+                  "type": "string",
+                  "description": "Five-field cron or supported descriptor, optionally CRON_TZ=<zone> prefixed. Missing timezone normalizes to CRON_TZ=UTC server-side; empty = manual/authenticated-HTTP fire only."
+                },
+                "command": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Argv overriding the image CMD per fire; empty uses image ENTRYPOINT/CMD."
+                },
+                "timeoutSeconds": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 3600,
+                  "description": "Run timeout; default 600 when omitted."
+                },
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Default true; gates scheduled firing only."
+                },
+                "env": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Plaintext nonsecrets ONLY (never secrets)."
+                }
+              }
+            },
+            "description": "Declarative App Triggers keyed by trigger name (existing trigger-name rules, scoped to the owning App). Missing/empty = desired CI-owned set is empty."
+          }
+        }
+      },
+      "description": "Independently deployed workloads keyed by canonical lowercase DNS-label service key."
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 1,
+          "description": "Schema version. Must be 1 in v1."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+          "description": "Optional app identity. Default = sanitized repo name (lowercase DNS-label rules mirroring apps.ValidateInternalHostname). A push matching by provisioned_repo renames the row in place when name: differs."
+        },
+        "domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Optional explicit domains. Default = auto <name>.<autoDomainSuffix>. Each entry x ports[0] becomes a DomainBinding (publicPath and internalPath '/', tlsMode auto). Suffix must match AllowedDomainSuffix or equal the auto form (409 ERR_HOST_CLAIMED on conflict)."
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "description": "Optional container ports. First = proxy target + health default. Empty (absent) means port 80. Ports beyond the first are accepted but only the first is routed (multi-port routing is out of scope)."
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional replica count. Default = policy.defaultReplicas. Yaml is source of truth: every CI deploy overwrites replicas (a manual scale-up IS reverted on next push). Negative is a 400, not fillDefaults."
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpus": {
+              "type": "number",
+              "minimum": 0
+            },
+            "memoryMb": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "description": "Optional resource limits (apps.ValidateResources). Zero = unlimited sentinel; memoryMb > 0 and < 4 is rejected (Docker minimum)."
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^/"
+            }
+          },
+          "description": "Optional readiness probe. path present = HTTP probe ({mode:http, httpPath:path}); absent = TCP default (existing behavior)."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional plaintext non-secrets ONLY (map[string]string). Do NOT put secrets in git \u2014 attach secrets via dashboard env groups. Sorted by key for determinism when mapped to []EnvVar (secret:false)."
+        },
+        "envGroups": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Optional subscribed env-group names. Must already exist (else ERR_UNKNOWN_ENV_GROUP). Resolved live at spawn time; app vars win on collision."
+        },
+        "envMounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "group",
+              "path"
+            ],
+            "properties": {
+              "group": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Existing env-group name (else ERR_UNKNOWN_ENV_GROUP). Existence resolves at materialize time \u2014 fail closed per spawn, never an empty dir."
+              },
+              "path": {
+                "type": "string",
+                "minLength": 2,
+                "pattern": "^/",
+                "description": "Absolute clean container path. '/' and '..' segments rejected; must not overlap sibling mounts or volumes targets."
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "0600",
+                  "0640",
+                  "0644"
+                ],
+                "description": "Optional file mode, default 0640 (0600 breaks common non-root runtimes). Whitelist only."
+              }
+            }
+          },
+          "description": "Optional file-mount groups (\u00a73b). Materialized to <dataDir>/envmounts/<appID>/<groupID>/<KEY> and bind-mounted <hostDir>:<containerPath>:ro."
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "services"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "services": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 63,
+                "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+                "description": "Optional App identity. Default = <sanitized-repo>-<service>. Overlong/reserved/conflicting names are rejected, never truncated."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "service",
+                  "job"
+                ],
+                "description": "REQUIRED in v2 (no implicit default). service = long-lived replicas; job = image with zero permanent replicas. Static artifacts stay outside."
+              },
+              "build": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "context": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repo-root-relative build context dir (default .). Absolute paths, traversal, remote contexts, and CLI flags are rejected; must exist."
+                  },
+                  "dockerfile": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repo-root-relative Dockerfile path (default Dockerfile). May sit outside the context but never outside the repo; must exist."
+                  },
+                  "target": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional Dockerfile build stage."
+                  }
+                }
+              },
+              "deploy": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "replicas": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Service: default = policy.defaultReplicas. Job: must be 0 when present (zero replicas representation); positive replicas rejected."
+                  },
+                  "ports": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 65535
+                    },
+                    "description": "Service: first = proxy target. Job: must not be declared."
+                  },
+                  "domains": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "Service: omitted = auto-domain policy, explicit [] = private. Job: must not declare entries."
+                  },
+                  "readiness": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^/"
+                      }
+                    },
+                    "description": "Service: path present = HTTP probe. Job: must not declare a path."
+                  },
+                  "env": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "Plaintext nonsecrets ONLY."
+                  },
+                  "resources": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "cpus": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "memoryMb": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "envGroups": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "envMounts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "group",
+                        "path"
+                      ],
+                      "properties": {
+                        "group": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "path": {
+                          "type": "string",
+                          "minLength": 2,
+                          "pattern": "^/"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "0600",
+                            "0640",
+                            "0644"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                "description": "Same shapes as v1. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
+              },
+              "triggers": {
+                "type": "object",
+                "maxProperties": 64,
+                "propertyNames": {
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "schedule": {
+                      "type": "string",
+                      "description": "Five-field cron or supported descriptor, optionally CRON_TZ=<zone> prefixed. Missing timezone normalizes to CRON_TZ=UTC server-side; empty = manual/authenticated-HTTP fire only."
+                    },
+                    "command": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "Argv overriding the image CMD per fire; empty uses image ENTRYPOINT/CMD."
+                    },
+                    "timeoutSeconds": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 3600,
+                      "description": "Run timeout; default 600 when omitted."
+                    },
+                    "enabled": {
+                      "type": "boolean",
+                      "description": "Default true; gates scheduled firing only."
+                    },
+                    "env": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Plaintext nonsecrets ONLY (never secrets)."
+                    }
+                  }
+                },
+                "description": "Declarative App Triggers keyed by trigger name (existing trigger-name rules, scoped to the owning App). Missing/empty = desired CI-owned set is empty."
+              }
+            }
+          },
+          "description": "Independently deployed workloads keyed by canonical lowercase DNS-label service key."
+        }
+      }
+    }
+  ]
+}
