@@ -3,7 +3,7 @@
 
 Called once per matrix leg with that leg's pushed digest. Posts
 POST /api/ci/deploy/workload, then polls GET /api/ci/deployments/:id
-every --poll-interval seconds until phase ready/failed or
+every --poll-interval seconds until phase completed/failed/cancelled or
 --poll-timeout expires (default 20 minutes, independent of the job's
 build timeout).
 
@@ -256,14 +256,20 @@ def main(argv=None):
             phase = payload["data"]["phase"]
         except (KeyError, TypeError):
             fail(f"poll response missing phase: {payload}", result, args.result_out)
-        if phase == "ready":
+        # Server terminal-success phase is "completed" (deployments.go:
+        # admitted → building → spawning → verifying → cutover →
+        # draining → completed; terminal = completed/failed/cancelled).
+        # "ready" is the RELEASE status, never a deployment phase —
+        # accepted here only as an alias so this script also polls
+        # correctly against any server that ever reported it.
+        if phase in ("completed", "ready"):
             result["phase"] = "ready"
             if args.type == "job":
                 result["note"] = "image + trigger config active; ready for runs (no run fired)"
             write_result(result, args.result_out)
             print(f"{args.service}: ready ({deploy_url})")
             return 0
-        if phase == "failed":
+        if phase in ("failed", "cancelled"):
             try:
                 reason = (
                     payload["data"].get("failureReason")

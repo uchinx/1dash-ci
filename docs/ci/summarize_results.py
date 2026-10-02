@@ -17,7 +17,7 @@ import json
 import os
 import sys
 
-OK_PHASES = {"ready"}
+OK_PHASES = {"ready", "completed"}
 
 
 def load_results(results_dir):
@@ -55,7 +55,7 @@ def render(results, broken, expected):
         phase = res.get("phase", "missing")
         image = short_image(res.get("image", ""))
         deployment = res.get("deployment_id", "")
-        if phase == "ready":
+        if phase in OK_PHASES:
             outcome = "ready" if kind != "job" else "ready for runs"
             detail = res.get("note", "")
         elif phase == "failed":
