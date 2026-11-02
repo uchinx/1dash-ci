@@ -24,8 +24,11 @@ services:
       target: production # optional Dockerfile build stage
     deploy:
       replicas: 2
-      ports: [8080]
-      domains: [api.example.com]
+      ports: [8080, 9090]
+      domains:
+        - api.example.com # bare host → ports[0] (8080), "/" → "/", TLS auto
+        - host: admin.example.com # object form pins its own port
+          port: 9090
       readiness:
         path: /healthz
       env:
@@ -66,4 +69,12 @@ services:
     deploy:
       replicas: 1
       domains: [] # explicitly private; no auto-domain
+      envGroups: [shared-postgres] # env group id OR unique name
+      volumes:
+        # named volume (created by Docker on first use)
+        - worker-data:/data
+        # host bind: source must sit under settings
+        # provisioning.allowedBindMountPrefixes, e.g.
+        # - /srv/shop/worker.toml:/app/worker.toml:ro
+        # Omit `volumes` to keep dashboard-managed mounts; [] removes all.
     triggers: {}

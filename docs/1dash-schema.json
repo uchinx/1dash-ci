@@ -191,10 +191,50 @@
               "domains": {
                 "type": "array",
                 "items": {
-                  "type": "string",
-                  "minLength": 1
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "host"
+                      ],
+                      "properties": {
+                        "host": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "port": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 65535,
+                          "description": "Container port this host routes to. Default = ports[0] (80 when no ports)."
+                        },
+                        "publicPath": {
+                          "type": "string",
+                          "pattern": "^/",
+                          "description": "Default /."
+                        },
+                        "internalPath": {
+                          "type": "string",
+                          "pattern": "^/",
+                          "description": "Default /."
+                        },
+                        "tlsMode": {
+                          "enum": [
+                            "auto",
+                            "off"
+                          ],
+                          "description": "Default auto."
+                        }
+                      }
+                    }
+                  ]
                 },
-                "description": "Service: omitted = auto-domain policy, explicit [] = private. Job: must not declare entries."
+                "description": "Service: omitted = auto-domain policy, explicit [] = private. Each entry is a host string (routed to ports[0], paths '/', TLS auto) or an object {host, port?, publicPath?, internalPath?, tlsMode?} so several hosts can route to different container ports. Job: must not declare entries."
               },
               "readiness": {
                 "type": "object",
@@ -234,7 +274,8 @@
                 "items": {
                   "type": "string",
                   "minLength": 1
-                }
+                },
+                "description": "Env groups to subscribe to, by group id OR unique name (resolved server-side; unknown = 400 ERR_UNKNOWN_ENV_GROUP)."
               },
               "envMounts": {
                 "type": "array",
@@ -248,7 +289,8 @@
                   "properties": {
                     "group": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "description": "Env group id OR unique name."
                     },
                     "path": {
                       "type": "string",
@@ -265,9 +307,19 @@
                     }
                   }
                 }
+              },
+              "volumes": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "pattern": "^([a-zA-Z0-9][a-zA-Z0-9_.-]+|/[^:]*):/[^:]*(:[a-zA-Z,]+)?$"
+                },
+                "description": "docker -v specs 'source:/container/path[:ro|rw|z|Z]'. Source = named volume (e.g. app-data) or absolute host path, which must sit under settings provisioning.allowedBindMountPrefixes (empty = named volumes only). Omitted = keep the App's current volumes; explicit [] = remove all. Writable mounts make the App stateful (recreate rollout)."
               }
             },
-            "description": "Same shapes as v1. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
+            "description": "Same shapes as v1 plus volumes and object domain entries. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
           },
           "triggers": {
             "type": "object",
@@ -517,10 +569,50 @@
                   "domains": {
                     "type": "array",
                     "items": {
-                      "type": "string",
-                      "minLength": 1
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "host"
+                          ],
+                          "properties": {
+                            "host": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "port": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 65535,
+                              "description": "Container port this host routes to. Default = ports[0] (80 when no ports)."
+                            },
+                            "publicPath": {
+                              "type": "string",
+                              "pattern": "^/",
+                              "description": "Default /."
+                            },
+                            "internalPath": {
+                              "type": "string",
+                              "pattern": "^/",
+                              "description": "Default /."
+                            },
+                            "tlsMode": {
+                              "enum": [
+                                "auto",
+                                "off"
+                              ],
+                              "description": "Default auto."
+                            }
+                          }
+                        }
+                      ]
                     },
-                    "description": "Service: omitted = auto-domain policy, explicit [] = private. Job: must not declare entries."
+                    "description": "Service: omitted = auto-domain policy, explicit [] = private. Each entry is a host string (routed to ports[0], paths '/', TLS auto) or an object {host, port?, publicPath?, internalPath?, tlsMode?} so several hosts can route to different container ports. Job: must not declare entries."
                   },
                   "readiness": {
                     "type": "object",
@@ -560,7 +652,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1
-                    }
+                    },
+                    "description": "Env groups to subscribe to, by group id OR unique name (resolved server-side; unknown = 400 ERR_UNKNOWN_ENV_GROUP)."
                   },
                   "envMounts": {
                     "type": "array",
@@ -574,7 +667,8 @@
                       "properties": {
                         "group": {
                           "type": "string",
-                          "minLength": 1
+                          "minLength": 1,
+                          "description": "Env group id OR unique name."
                         },
                         "path": {
                           "type": "string",
@@ -591,9 +685,19 @@
                         }
                       }
                     }
+                  },
+                  "volumes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "pattern": "^([a-zA-Z0-9][a-zA-Z0-9_.-]+|/[^:]*):/[^:]*(:[a-zA-Z,]+)?$"
+                    },
+                    "description": "docker -v specs 'source:/container/path[:ro|rw|z|Z]'. Source = named volume (e.g. app-data) or absolute host path, which must sit under settings provisioning.allowedBindMountPrefixes (empty = named volumes only). Omitted = keep the App's current volumes; explicit [] = remove all. Writable mounts make the App stateful (recreate rollout)."
                   }
                 },
-                "description": "Same shapes as v1. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
+                "description": "Same shapes as v1 plus volumes and object domain entries. Cross-field job restrictions (no ports/domains/readiness, zero replicas) are enforced server-side."
               },
               "triggers": {
                 "type": "object",
